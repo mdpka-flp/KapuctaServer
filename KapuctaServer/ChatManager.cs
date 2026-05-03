@@ -92,9 +92,22 @@ namespace Kapuctagram.Server
 
         public ChatInfo CreatePersonalChat(string type, string name, string password, long ownerId, long targetUserId)
         {
+            var existingId = FindPersonalChat(ownerId, targetUserId);
+            if (existingId.HasValue && TryGetChat(existingId.Value, out var existingChat))
+                return existingChat;
             var chat = CreateChat(type, name, password, ownerId);
             AddParticipant(chat.Id, targetUserId);
             return chat;
+        }
+        
+        public long? FindPersonalChat(long userId1, long userId2)
+        {
+            return _chats.Values
+                .Where(c => c.Type == "P" && 
+                            c.ParticipantIds.Contains(userId1) && 
+                            c.ParticipantIds.Contains(userId2))
+                .Select(c => (long?)c.Id)
+                .FirstOrDefault();
         }
 
         public bool TryGetChat(long chatId, out ChatInfo chat) => _chats.TryGetValue(chatId, out chat);
@@ -215,6 +228,19 @@ namespace Kapuctagram.Server
             return _chats.Values
                 .Where(c => c.Name.Contains(nameSubstring, StringComparison.OrdinalIgnoreCase))
                 .ToList();
+        }
+        
+        public string GetUserName(long userId)
+        {
+            if (!File.Exists(_usersFile)) return userId.ToString();
+            var lines = File.ReadAllLines(_usersFile);
+            foreach (var line in lines)
+            {
+                var parts = line.Split(new[] { " | " }, StringSplitOptions.None);
+                if (parts.Length >= 3 && long.TryParse(parts[1], out long uid) && uid == userId)
+                    return parts[2];
+            }
+            return userId.ToString();
         }
     }
 }

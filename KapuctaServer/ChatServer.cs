@@ -200,11 +200,26 @@ namespace Kapuctagram.Server
                             if (chat.Type == "C" && !chat.AdminIds.Contains(session.UserId)) return;
 
                             _chatManager.SaveMessage(targetChatId, $"[{DateTime.Now:HH:mm}] {session.Name}: {text}");
+
+                            // Рассылка участникам, у которых чат подписан
                             foreach (var subscriberId in chat.ParticipantIds)
                             {
                                 if (_sessions.TryGetValue(subscriberId, out var sub) && sub.SubscribedChats.Contains(targetChatId))
                                 {
                                     await SendMessageAsync(sub.Client, 'M', $"{targetChatId}|{session.Name}|{text}");
+                                }
+                            }
+
+                            // Уведомление получателя в личном чате, если он ещё не подписан
+                            if (chat.Type == "P")
+                            {
+                                var recipientId = chat.ParticipantIds.FirstOrDefault(id => id != session.UserId);
+                                if (recipientId != 0 && _sessions.TryGetValue(recipientId, out var recipientSession))
+                                {
+                                    if (!recipientSession.SubscribedChats.Contains(targetChatId))
+                                    {
+                                        await SendMessageAsync(recipientSession.Client, 'N', chat.Id.ToString());
+                                    }
                                 }
                             }
                         }
@@ -219,8 +234,8 @@ namespace Kapuctagram.Server
                     {
                         string fileName = fParts[1];
                         int fileId = await SaveFileAsync(session.Client.GetStream(), fileName, fileSize, fileChatId);
-                        string notification = $"{session.Name} отправил файл: {fileName} (ID: {fileId})";
-                        _chatManager.SaveMessage(fileChatId, notification);
+                        string fileRecord = $"[FILE] {fileChatId}|{fileId}|{fileName}|{session.Name}";
+                        _chatManager.SaveMessage(fileChatId, fileRecord);
                         if (_chatManager.TryGetChat(fileChatId, out var chat))
                         {
                             foreach (var subscriberId in chat.ParticipantIds)
@@ -261,7 +276,21 @@ namespace Kapuctagram.Server
                 {
                     if (long.TryParse(msg.Data, out long infoChatId) && _chatManager.TryGetChat(infoChatId, out var infoChat))
                     {
-                        string infoData = $"{infoChat.Id}|{infoChat.Name}|{infoChat.Type}|{string.Join(",", infoChat.AdminIds)}|{string.Join(",", infoChat.BannedIds)}|{string.Join(",", infoChat.ParticipantIds)}|{infoChat.OwnerId}|{infoChat.MaxMembers}|{infoChat.Password}";
+                        string chatName = infoChat.Name;
+                        if (infoChat.Type == "P" && session != null)
+                        {
+                            var otherId = infoChat.ParticipantIds.FirstOrDefault(id => id != session.UserId);
+                            if (otherId != 0)
+                            {
+                                var otherName = _chatManager.GetUserName(otherId);
+                                chatName = $"Личный чат с {otherName}";
+                            }
+                            else
+                            {
+                                chatName = "⭐ Избранное";
+                            }
+                        }
+                        string infoData = $"{infoChat.Id}|{chatName}|{infoChat.Type}|{string.Join(",", infoChat.AdminIds)}|{string.Join(",", infoChat.BannedIds)}|{string.Join(",", infoChat.ParticipantIds)}|{infoChat.OwnerId}|{infoChat.MaxMembers}|{infoChat.Password}";
                         await SendMessageAsync(session.Client, 'I', infoData);
                     }
                     break;
@@ -301,7 +330,7 @@ namespace Kapuctagram.Server
                         {
                             var user = _chatManager.FindUserById(qId);
                             if (user.HasValue)
-                                results.Add($"{user.Value.Id}|user|{user.Value.Name}|👤 Пользователь: {user.Value.Name} (ID: {user.Value.Id})");
+                                results.Add($"{user.Value.Id}|user|{user.Value.Name}|👤: {user.Value.Name} (ID: {user.Value.Id})");
                         }
                         else
                         {
@@ -315,7 +344,7 @@ namespace Kapuctagram.Server
                     else
                     {
                         foreach (var u in _chatManager.FindUsersByName(query))
-                            results.Add($"{u.Id}|user|{u.Name}|👤 Пользователь: {u.Name} (ID: {u.Id})");
+                            results.Add($"{u.Id}|user|{u.Name}|👤: {u.Name} (ID: {u.Id})");
                         foreach (var c in _chatManager.SearchChatsByName(query))
                         {
                             string icon = c.Type == "G" ? "💬" : (c.Type == "C" ? "📢" : "💌");
@@ -325,7 +354,60 @@ namespace Kapuctagram.Server
                     await SendMessageAsync(session.Client, 'Q', string.Join("\n", results));
                     break;
                 }
+                
+                case 'D': // Download file
+                {
+                    var dParts = msg.Data.Split('|');
+                    if (dParts.Length >= 2 && long.TryParse(dParts[0], out long dChatId) && long.TryParse(dParts[1], out long dFileId))
+                    {
+                        string chatDir = Path.Combine("data", "chats", dChatId.ToString(), "files");
+                        if (Directory.Exists(chatDir))
+                        {
+                            var matchingFile = Directory.GetFiles(chatDir, $"{dFileId}_*").FirstOrDefault();
+                            if (matchingFile != null)
+                            {
+                                var fileInfo = new FileInfo(matchingFile);
+                                await SendMessageAsync(session.Client, 'D', $"OK|{fileInfo.Length}");
+                                using var fs = File.OpenRead(matchingFile);
+                                await fs.CopyToAsync(session.Client.GetStream());
+                                await session.Client.GetStream().FlushAsync(); // добавлено
+                            }
+                            else
+                            {
+                                await SendMessageAsync(session.Client, 'D', "ERROR|File not found");
+                            }
+                        }
+                        else
+                        {
+                            await SendMessageAsync(session.Client, 'D', "ERROR|Chat directory missing");
+                        }
+                    }
+                    break;
+                }
+                
+                case 'H': // Get chat history
+                {
+                    var hParts = msg.Data.Split('|');
+                    if (hParts.Length >= 2 && long.TryParse(hParts[0], out long historyChatId))
+                    {
+                        int count = 50;
+                        if (hParts.Length >= 3 && int.TryParse(hParts[2], out int requestedCount))
+                            count = Math.Min(requestedCount, 200);
+                        string history = await LoadHistoryAsync(historyChatId, count);
+                        await SendMessageAsync(session.Client, 'H', $"{historyChatId}|{history}");
+                    }
+                    break;
+                }
             }
+        }
+        
+        private async Task<string> LoadHistoryAsync(long chatId, int count)
+        {
+            string messagesPath = Path.Combine("data", "chats", chatId.ToString(), "messages.txt");
+            if (!File.Exists(messagesPath)) return "";
+            var lines = await File.ReadAllLinesAsync(messagesPath);
+            var lastLines = lines.Reverse().Take(count).Reverse();
+            return string.Join("\n", lastLines);
         }
 
         private async Task SendMessageAsync(TcpClient client, char type, string data)
