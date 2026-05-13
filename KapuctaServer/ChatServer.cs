@@ -370,7 +370,9 @@ namespace Kapuctagram.Server
                                 await SendMessageAsync(session.Client, 'D', $"OK|{fileInfo.Length}");
                                 using var fs = File.OpenRead(matchingFile);
                                 await fs.CopyToAsync(session.Client.GetStream());
-                                await session.Client.GetStream().FlushAsync(); // добавлено
+                                await session.Client.GetStream().FlushAsync();
+                                // *** Добавить маркер конца передачи файла ***
+                                await SendMessageAsync(session.Client, 'E', "");  // пустое сообщение
                             }
                             else
                             {
